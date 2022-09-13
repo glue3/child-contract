@@ -20,16 +20,16 @@ use near_contract_standards::fungible_token::metadata::{
 };
 // use near_contract_standards::fungible_token::FungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{LazyOption, LookupMap};
+use near_sdk::collections::{LazyOption, UnorderedMap};
 use near_sdk::json_types::U128;
-use near_sdk::{env, log, near_bindgen, AccountId, Balance, PanicOnDefault, PromiseOrValue};
+use near_sdk::{env, near_bindgen, AccountId, Balance, PanicOnDefault};
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
     metadata: LazyOption<FungibleTokenMetadata>,
-    fundAccounts: LookupMap<String, Balance>,
-    accounts: LookupMap<AccountId, Balance>,
+    fundAccounts: UnorderedMap<String, Balance>,
+    accounts: UnorderedMap<AccountId, Balance>,
     canMint: bool,
     canBurn: bool,
     ownerId: AccountId,
@@ -59,8 +59,8 @@ impl Contract {
         metadata.assert_valid();
         let mut this = Self {
             metadata: LazyOption::new(b"m".to_vec(), Some(&metadata)),
-            accounts: LookupMap::new(b"a".to_vec()),
-            fundAccounts: LookupMap::new(b"f".to_vec()),
+            accounts: UnorderedMap::new(b"a".to_vec()),
+            fundAccounts: UnorderedMap::new(b"f".to_vec()),
             canBurn: can_burn,
             canMint: can_mint,
             ownerId: owner_id.clone(),
@@ -137,6 +137,13 @@ impl Contract {
         assert!(balance >= amountInt);
         self.fundAccounts.insert(&id, &(balance - amountInt));
         self.internal_deposit(&walletAddress, amountInt);
+        FtTransfer {
+            old_owner_id: &self.ownerId,
+            new_owner_id: &walletAddress,
+            amount: &amount,
+            memo: Some("transfered"),
+        }
+        .emit();
     }
 
     pub fn changeOwner(&mut self, address: AccountId) {
@@ -149,14 +156,35 @@ impl Contract {
         U128::from(balance)
     }
 
-    #[payable]
-    // does nothing but show on a wallet
-    pub fn storage_deposit(&mut self, account_id: AccountId) {
-
+    pub fn ft_fund_balance_of(&self, account_id: String) -> U128 {
+        let balance = self.fundAccounts.get(&account_id).unwrap_or(0);
+        U128::from(balance)
     }
 
-    pub fn storage_deposit_of(&self, account_id: AccountId) -> U128 {
-        U128::from(1_000_000_000_000_000_000_000_000)
+    pub fn total_users(&self) -> u64 {
+        self.accounts.len()
+    }
+
+    pub fn total_fund_users(&self) -> u64 {
+        self.fundAccounts.len()
+    }
+
+    pub fn list_balances(&self, start_index: usize, limit: usize) -> Vec<(AccountId, U128)>{
+        self.accounts
+            .iter()
+            .skip(start_index)
+            .take(limit)
+            .map(|(account_id, balance)| (account_id, U128::from(balance)))
+            .collect()
+    }
+
+    pub fn list_fund_balances(&self, start_index: usize, limit: usize) -> Vec<(String, U128)>{
+        self.fundAccounts
+            .iter()
+            .skip(start_index)
+            .take(limit)
+            .map(|(account_id, balance)| (account_id, U128::from(balance)))
+            .collect()
     }
 }
 
