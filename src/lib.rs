@@ -16,9 +16,9 @@ NOTES:
     keys on its account.
 */
 use near_contract_standards::fungible_token::metadata::{
-    FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
+    FungibleTokenMetadata, FungibleTokenMetadataProvider,
 };
-use near_contract_standards::fungible_token::FungibleToken;
+// use near_contract_standards::fungible_token::FungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LazyOption, LookupMap};
 use near_sdk::json_types::U128;
@@ -27,9 +27,9 @@ use near_sdk::{env, log, near_bindgen, AccountId, Balance, PanicOnDefault, Promi
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
-    token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
     fundAccounts: LookupMap<String, Balance>,
+    accounts: LookupMap<AccountId, Balance>,
     canMint: bool,
     canBurn: bool,
     ownerId: AccountId,
@@ -58,17 +58,16 @@ impl Contract {
         assert!(!env::state_exists(), "Already initialized");
         metadata.assert_valid();
         let mut this = Self {
-            token: FungibleToken::new(b"a".to_vec()),
             metadata: LazyOption::new(b"m".to_vec(), Some(&metadata)),
+            accounts: LookupMap::new(b"a".to_vec()),
             fundAccounts: LookupMap::new(b"f".to_vec()),
             canBurn: can_burn,
             canMint: can_mint,
             ownerId: owner_id.clone(),
             glueId: glue_id,
         };
-        this.token.internal_register_account(&owner_id.clone());
-        this.token.internal_deposit(&owner_id, total_supply.into());
-        near_contract_standards::fungible_token::events::FtMint {
+        this.accounts.insert(&owner_id, &u128::from(total_supply));
+        FtMint {
             owner_id: &owner_id,
             amount: &total_supply,
             memo: Some("Initial tokens supply is minted"),
@@ -77,15 +76,26 @@ impl Contract {
         this
     }
 
+    fn internal_deposit(&mut self, account: &AccountId, amount: u128) {
+        let balance = self.accounts.get(account).unwrap_or(0);
+        self.accounts.insert(&account, &(balance + amount));
+        
+    }
+    fn internal_withdraw(&mut self, account: &AccountId, amount: u128) {
+        let balance = self.accounts.get(account).unwrap_or(0);
+        assert!(balance >= amount);
+        self.accounts.insert(&account, &(balance - amount));
+    }
+
     pub fn burnToken(&mut self, amount: U128) {
         assert!(self.canBurn);
         assert!(env::signer_account_id() == self.ownerId);
-        self.token.internal_withdraw(&self.ownerId, amount.into());
+        self.internal_withdraw(&self.ownerId.clone(), amount.into());
     }
     pub fn mintToken(&mut self, amount: U128) {
         assert!(self.canMint);
         assert!(env::signer_account_id() == self.ownerId);
-        self.token.internal_deposit(&self.ownerId, amount.into());
+        self.internal_deposit(&self.ownerId.clone(), amount.into());
     }
 
     // pub fn sendToken()
@@ -95,11 +105,24 @@ impl Contract {
     // //     this.internalTransfer(this.owner, walletAddress, amount, "")
     // // }
 
+    pub fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128) {
+        let sender = env::signer_account_id();
+        self.internal_withdraw(&sender, amount.into());
+        self.internal_deposit(&receiver_id, amount.into());
+        FtTransfer {
+            old_owner_id: &sender,
+            new_owner_id: &receiver_id,
+            amount: &amount,
+            memo: Some("transfered"),
+        }
+        .emit();
+    }
+
     // add to users tokens to fund map
     pub fn sendToFund(&mut self, id: String, amount: U128) {
         let signer = env::signer_account_id();
         assert!(signer == self.ownerId || signer == self.glueId);
-        self.token.internal_withdraw(&self.ownerId, amount.into());
+        self.internal_withdraw(&self.ownerId.clone(), amount.into());
         let balance: u128 = self.fundAccounts.get(&id).unwrap_or(0);
         let new_balance: u128 = balance + u128::from(amount);
         self.fundAccounts.insert(&id, &new_balance);
@@ -113,21 +136,152 @@ impl Contract {
         let amountInt = u128::from(amount);
         assert!(balance >= amountInt);
         self.fundAccounts.insert(&id, &(balance - amountInt));
-        self.token.internal_deposit(&walletAddress, amountInt);
+        self.internal_deposit(&walletAddress, amountInt);
     }
 
     pub fn changeOwner(&mut self, address: AccountId) {
         assert!(env::signer_account_id() == self.ownerId);
         self.ownerId = address;
     }
-}
 
-// near_contract_standards::impl_fungible_token_core!(Contract, token, on_tokens_burned);
-// near_contract_standards::impl_fungible_token_storage!(Contract, token, on_account_closed);
+    pub fn ft_balance_of(&self, account_id: AccountId) -> U128 {
+        let balance = self.accounts.get(&account_id).unwrap_or(0);
+        U128::from(balance)
+    }
+
+    #[payable]
+    // does nothing but show on a wallet
+    pub fn storage_deposit(&mut self, account_id: AccountId) {
+
+    }
+
+    pub fn storage_deposit_of(&self, account_id: AccountId) -> U128 {
+        U128::from(1_000_000_000_000_000_000_000_000)
+    }
+}
 
 #[near_bindgen]
 impl FungibleTokenMetadataProvider for Contract {
     fn ft_metadata(&self) -> FungibleTokenMetadata {
         self.metadata.get().unwrap()
     }
+}
+
+
+//ß Standard for nep141 (Fungible Token) events.
+//ß
+//ß These events will be picked up by the NEAR indexer.
+//ß
+//ß <https://github.com/near/NEPs/blob/master/specs/Standards/FungibleToken/Event.md>
+//ß
+//ß This is an extension of the events format (nep-297):
+//ß <https://github.com/near/NEPs/blob/master/specs/Standards/EventsFormat.md>
+//ß
+//ß The three events in this standard are [`FtMint`], [`FtTransfer`], and [`FtBurn`].
+//ß
+//ß These events can be logged by calling `.emit()` on them if a single event, or calling
+//ß [`FtMint::emit_many`], [`FtTransfer::emit_many`],
+//ß or [`FtBurn::emit_many`] respectively.
+
+use near_sdk::serde::Serialize;
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "standard")]
+#[must_use = "don't forget to `.emit()` this event"]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NearEvent<'a> {
+    Nep141(Nep141Event<'a>),
+}
+
+impl<'a> NearEvent<'a> {
+    fn to_json_string(&self) -> String {
+        // Events cannot fail to serialize so fine to panic on error
+        #[allow(clippy::redundant_closure)]
+        serde_json::to_string(self).ok().unwrap_or_else(|| env::abort())
+    }
+
+    fn to_json_event_string(&self) -> String {
+        format!("EVENT_JSON:{}", self.to_json_string())
+    }
+
+    /// Logs the event to the host. This is required to ensure that the event is triggered
+    /// and to consume the event.
+    pub(crate) fn emit(self) {
+        near_sdk::env::log_str(&self.to_json_event_string());
+    }
+}
+
+
+/// Data to log for an FT mint event. To log this event, call [`.emit()`](FtMint::emit).
+#[must_use]
+#[derive(Serialize, Debug, Clone)]
+pub struct FtMint<'a> {
+    pub owner_id: &'a AccountId,
+    pub amount: &'a U128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<&'a str>,
+}
+
+impl FtMint<'_> {
+    /// Logs the event to the host. This is required to ensure that the event is triggered
+    /// and to consume the event.
+    pub fn emit(self) {
+        Self::emit_many(&[self])
+    }
+
+    /// Emits an FT mint event, through [`env::log_str`](near_sdk::env::log_str),
+    /// where each [`FtMint`] represents the data of each mint.
+    pub fn emit_many(data: &[FtMint<'_>]) {
+        new_141_v1(Nep141EventKind::FtMint(data)).emit()
+    }
+}
+
+/// Data to log for an FT transfer event. To log this event,
+/// call [`.emit()`](FtTransfer::emit).
+#[must_use]
+#[derive(Serialize, Debug, Clone)]
+pub struct FtTransfer<'a> {
+    pub old_owner_id: &'a AccountId,
+    pub new_owner_id: &'a AccountId,
+    pub amount: &'a U128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<&'a str>,
+}
+
+impl FtTransfer<'_> {
+    /// Logs the event to the host. This is required to ensure that the event is triggered
+    /// and to consume the event.
+    pub fn emit(self) {
+        Self::emit_many(&[self])
+    }
+
+    /// Emits an FT transfer event, through [`env::log_str`](near_sdk::env::log_str),
+    /// where each [`FtTransfer`] represents the data of each transfer.
+    pub fn emit_many(data: &[FtTransfer<'_>]) {
+        new_141_v1(Nep141EventKind::FtTransfer(data)).emit()
+    }
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct Nep141Event<'a> {
+    version: &'static str,
+    #[serde(flatten)]
+    event_kind: Nep141EventKind<'a>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "event", content = "data")]
+#[serde(rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
+enum Nep141EventKind<'a> {
+    FtMint(&'a [FtMint<'a>]),
+    FtTransfer(&'a [FtTransfer<'a>]),
+}
+
+fn new_141<'a>(version: &'static str, event_kind: Nep141EventKind<'a>) -> NearEvent<'a> {
+    NearEvent::Nep141(Nep141Event { version, event_kind })
+}
+
+fn new_141_v1(event_kind: Nep141EventKind) -> NearEvent {
+    new_141("1.0.0", event_kind)
 }
